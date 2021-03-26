@@ -9,6 +9,7 @@
 #include <ngx_http.h>
 #include <ngx_core.h>
 #include <ngx_conf_file.h>
+#include "ddebug.h"
 
 
 static void *ngx_http_dynamic_sendfile_create_loc_conf(ngx_conf_t *cf);
@@ -189,6 +190,7 @@ ngx_http_dynamic_sendfile_create_ctx(ngx_http_request_t *r)
 
     ngx_memcpy(ctx->finished_filename->data, path.data, path.len);
     ctx->finished_filename->len = path.len;
+    *(ctx->finished_filename->data + ctx->finished_filename->len) = 0;
 
     /* create writing filename */
     ctx->writing_filename = ngx_palloc(r->pool, sizeof(ngx_str_t));
@@ -201,6 +203,7 @@ ngx_http_dynamic_sendfile_create_ctx(ngx_http_request_t *r)
     ngx_memcpy(ctx->writing_filename->data, path.data, path.len);
     ngx_memcpy(ctx->writing_filename->data + path.len, dscf->file_suffix.data, dscf->file_suffix.len);
     ctx->writing_filename->len = path.len + dscf->file_suffix.len;
+    *(ctx->writing_filename->data + ctx->writing_filename->len) = 0;
 
     /* register event handler */
     ctx->read_evt.handler = ngx_http_dynamic_sendfile_event_handler;
@@ -214,7 +217,6 @@ ngx_http_dynamic_sendfile_create_ctx(ngx_http_request_t *r)
 ngx_int_t
 ngx_http_dynamic_sendfile_handler(ngx_http_request_t *r)
 {
-    ngx_int_t                               rc;
     ngx_http_dynamic_sendfile_ctx_t         *ctx;
     ngx_http_dynamic_sendfile_loc_conf_t    *dscf;
 
@@ -222,16 +224,18 @@ ngx_http_dynamic_sendfile_handler(ngx_http_request_t *r)
         return NGX_HTTP_NOT_ALLOWED;
     }
 
-    /* chunked transfer not support below http/1.1*/
+   /* chunked transfer not support below http/1.1*/
     if (r->http_version < NGX_HTTP_VERSION_11) {
-        return NGX_HTTP_NOT_FOUND;
-    }
+        ngx_log_error(NGX_LOG_NOTICE, r->connection->log, ngx_errno,
+                        "chunked transfer need http/1.1 but now http version is '%V', now try open static file", 
+                        &r->http_protocol);
+        return NGX_DECLINED;
+    } 
 
     if (ngx_http_discard_request_body(r) != NGX_OK) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno, "ngx_http_discard_request_body() failed");
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
-
-   
 
     dscf = ngx_http_get_module_loc_conf(r, ngx_http_dynamic_sendfile_module);
     if (dscf == NULL) {
@@ -244,13 +248,20 @@ ngx_http_dynamic_sendfile_handler(ngx_http_request_t *r)
         if (ctx == NULL) {
             return NGX_HTTP_INTERNAL_SERVER_ERROR;
         }
-        /* open file */
-        ctx->fd = ngx_open_file(ctx->writing_filename->data, NGX_FILE_RDONLY, NGX_FILE_OPEN, NGX_FILE_DEFAULT_ACCESS);
-        if (ctx->fd < 0) {
-            ngx_log_error(NGX_LOG_ERR, r->connection->log, ngx_errno, "open file error '%V'", ctx->writing_filename);
-            return NGX_HTTP_NOT_FOUND;
-        }
         ngx_http_set_ctx(r, ctx, ngx_http_dynamic_sendfile_module);
+    }
+
+    if (ngx_is_file_write_done(ctx->finished_filename) == NGX_OK) { 
+        dd("the file(%s) existed, next to static file handler", ctx->finished_filename->data);
+        return NGX_DECLINED;
+    }
+
+    /* open file */
+    ctx->fd = ngx_open_file(ctx->writing_filename->data, NGX_FILE_RDONLY, NGX_FILE_OPEN, NGX_FILE_DEFAULT_ACCESS);
+    if (ctx->fd < 0) {
+        ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0,
+                          "open tmp file(%V) failed, try to open finished file(%V)", ctx->writing_filename, ctx->finished_filename);
+        return NGX_DECLINED;
     }
 
     /* send http reponse header */
@@ -264,7 +275,7 @@ ngx_http_dynamic_sendfile_handler(ngx_http_request_t *r)
 
     ngx_http_dynamic_sendfile_add_cleanup(r);
 
-    return rc;
+    return NGX_DONE;
 }
 
 
@@ -276,7 +287,7 @@ ngx_is_file_write_done(ngx_str_t *finished_name)
 
     ngx_file_info(finished_name->data, &fi);
 
-    if (ngx_is_file(&fi)) {
+    if (ngx_is_file(&fi) && ngx_file_size(&fi) > 0) {
         return NGX_OK;
     }
     return NGX_ERROR;
@@ -286,14 +297,13 @@ ngx_is_file_write_done(ngx_str_t *finished_name)
 ngx_int_t
 ngx_http_dynamic_sendfile_header_needed(ngx_http_request_t *r)
 {
-    ngx_log_stderr(0, "ngx_http_dynamic_sendfile_header_needed");
+    dd("ngx_http_dynamic_sendfile_header_needed");
     if (!r->header_sent) {
-        r->keepalive = 0;
         r->headers_out.status = NGX_HTTP_OK;
         if (ngx_http_set_content_type(r) != NGX_OK) {
             return NGX_HTTP_INTERNAL_SERVER_ERROR;
         }
-        /* chunked transfer */
+        /* Need these for chunked transfer */
         ngx_http_clear_content_length(r);
         ngx_http_clear_accept_ranges(r);
         return ngx_http_send_header(r);
@@ -313,7 +323,7 @@ ngx_http_sendfile_contents(ngx_http_request_t *r)
     ngx_http_dynamic_sendfile_loc_conf_t    *dscf;
     size_t                                  n;
 
-    ngx_log_stderr(0, "ngx_http_sendfile_contents");
+    dd("ngx_http_sendfile_contents");
 
     dscf = ngx_http_get_module_loc_conf(r, ngx_http_dynamic_sendfile_module);
     if (dscf == NULL) {
@@ -325,12 +335,19 @@ ngx_http_sendfile_contents(ngx_http_request_t *r)
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    buf = ngx_create_temp_buf(r->pool, dscf->dy_send_buffer);
+    u_char content[dscf->dy_send_buffer];
+
+    buf = ngx_calloc_buf(r->pool);
     if (buf == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    n = ngx_read_fd(ctx->fd, buf->pos, dscf->dy_send_buffer);
+    n = ngx_read_fd(ctx->fd, content, sizeof(content));
+    if (n == 0) {
+        dd("the file have not updated yet");
+        return NGX_OK;
+    }
+    buf->start = buf->pos = content;
     buf->last = buf->end = buf->pos + n;
     buf->temporary = 1;
     buf->flush = 1;
@@ -339,10 +356,10 @@ ngx_http_sendfile_contents(ngx_http_request_t *r)
     if (out == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
-
     out->buf = buf;
     out->next = NULL;
 
+    dd("ready to send bytes(%zu)", n);
     return ngx_http_output_filter(r, out);
 }
 
@@ -356,7 +373,7 @@ ngx_http_dynamic_sendfile_cleanup_timer(void* data)
         return;
     }
 
-    ngx_log_stderr(0, "ngx_http_dynamic_sendfile_cleanup_timer");
+    dd("ngx_http_dynamic_sendfile_cleanup_timer");
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_dynamic_sendfile_module);
     if (ctx == NULL) {
@@ -382,7 +399,7 @@ ngx_http_dynamic_sendfile_add_cleanup(ngx_http_request_t *r)
         return;
     }
 
-    ngx_log_stderr(0, "ngx_http_dynamic_sendfile_add_cleanup");
+    dd("ngx_http_dynamic_sendfile_add_cleanup");
 
     /* request cleanup */
     cln = ngx_http_cleanup_add(r, 0);
@@ -393,7 +410,7 @@ ngx_http_dynamic_sendfile_add_cleanup(ngx_http_request_t *r)
     cln->data = r;
 
     /* cleanup opening file */
-    cln2 = ngx_pool_cleanup_add(r, sizeof(ngx_pool_cleanup_file_t));
+    cln2 = ngx_pool_cleanup_add(r->pool, sizeof(ngx_pool_cleanup_file_t));
     if (cln2 == NULL) {
         return;
     }
@@ -401,7 +418,6 @@ ngx_http_dynamic_sendfile_add_cleanup(ngx_http_request_t *r)
     ngx_pool_cleanup_file_t *clnf = cln2->data;
     clnf->fd = ctx->fd;
     clnf->log = r->pool->log;
-
 }
 
 
@@ -414,7 +430,7 @@ ngx_http_dynamic_sendfile_event_handler(ngx_event_t *ev)
     ngx_http_dynamic_sendfile_ctx_t         *ctx;
     ngx_http_dynamic_sendfile_loc_conf_t    *dscf;
 
-    ngx_log_stderr(0, "ngx_http_dynamic_sendfile_event_handler");
+    dd("ngx_http_dynamic_sendfile_event_handler");
 
     r = ev->data;
     c = r->connection;
@@ -441,6 +457,7 @@ ngx_http_dynamic_sendfile_event_handler(ngx_event_t *ev)
     }
 
     if (ngx_is_file_write_done(ctx->finished_filename) == NGX_OK) {
+        dd("the file(%s) is written, send last chunked", ctx->finished_filename->data);
         ngx_http_send_special(r, NGX_HTTP_LAST);
         ngx_http_finalize_request(r, NGX_OK);
     } else {
