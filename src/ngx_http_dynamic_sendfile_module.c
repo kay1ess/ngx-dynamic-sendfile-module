@@ -21,18 +21,21 @@ ngx_int_t ngx_http_dynamic_sendfile_handler(ngx_http_request_t *r);
 
 ngx_int_t ngx_http_dynamic_sendfile_header_needed(ngx_http_request_t *r);
 static void ngx_http_dynamic_sendfile_add_cleanup(ngx_http_request_t *r);
-void ngx_http_dynamic_sendfile_event_handler(ngx_event_t *ev);
+void ngx_http_dynamic_sendfile_send_handler(ngx_event_t *ev);
+void ngx_http_dynamic_sendfile_timeout_handler(ngx_event_t *ev);
 ngx_int_t ngx_is_file_write_done(ngx_str_t *finished_name);
 
 typedef struct {
     ngx_str_t                   file_suffix;
     ngx_msec_t                  dy_send_interval;
     size_t                      dy_send_buffer;
+    ngx_msec_t                  dy_send_timeout;
 } ngx_http_dynamic_sendfile_loc_conf_t;
 
 
 typedef struct {
     ngx_event_t                 read_evt;                  /* read file */
+    ngx_event_t                 timeout_evt;
     ngx_str_t                   *writing_filename;
     ngx_str_t                   *finished_filename;
     ngx_fd_t                    fd;
@@ -54,6 +57,14 @@ static ngx_command_t ngx_http_dynamic_sendfile_commands[] = {
         ngx_conf_set_msec_slot,
         NGX_HTTP_LOC_CONF_OFFSET,
         offsetof(ngx_http_dynamic_sendfile_loc_conf_t, dy_send_interval),
+        NULL
+    },
+     {
+        ngx_string("dy_send_timeout"),
+        NGX_HTTP_LOC_CONF | NGX_CONF_TAKE1,
+        ngx_conf_set_msec_slot,
+        NGX_HTTP_LOC_CONF_OFFSET,
+        offsetof(ngx_http_dynamic_sendfile_loc_conf_t, dy_send_timeout),
         NULL
     },
     {
@@ -113,6 +124,7 @@ ngx_http_dynamic_sendfile_create_loc_conf(ngx_conf_t *cf)
         return NULL;
     }
     conf->dy_send_interval = NGX_CONF_UNSET_MSEC;
+    conf->dy_send_timeout = NGX_CONF_UNSET_MSEC;
     conf->dy_send_buffer = NGX_CONF_UNSET_SIZE;
     return conf;
 }
@@ -126,6 +138,7 @@ ngx_http_dynamic_sendfile_merge_loc_conf(ngx_conf_t *cf, void *parent, void *chi
 
     ngx_conf_merge_str_value(conf->file_suffix, prev->file_suffix, ".tmp");
     ngx_conf_merge_msec_value(conf->dy_send_interval, prev->dy_send_interval, 100); /* default 100ms */
+    ngx_conf_merge_msec_value(conf->dy_send_timeout, prev->dy_send_timeout, 10000); /* default 10s */
     ngx_conf_merge_size_value(conf->dy_send_buffer, prev->dy_send_buffer, 1024*10);  /* default 10k */ 
     return NGX_CONF_OK;
 }
@@ -190,7 +203,6 @@ ngx_http_dynamic_sendfile_create_ctx(ngx_http_request_t *r)
 
     ngx_memcpy(ctx->finished_filename->data, path.data, path.len);
     ctx->finished_filename->len = path.len;
-    *(ctx->finished_filename->data + ctx->finished_filename->len) = 0;
 
     /* create writing filename */
     ctx->writing_filename = ngx_palloc(r->pool, sizeof(ngx_str_t));
@@ -203,12 +215,14 @@ ngx_http_dynamic_sendfile_create_ctx(ngx_http_request_t *r)
     ngx_memcpy(ctx->writing_filename->data, path.data, path.len);
     ngx_memcpy(ctx->writing_filename->data + path.len, dscf->file_suffix.data, dscf->file_suffix.len);
     ctx->writing_filename->len = path.len + dscf->file_suffix.len;
-    *(ctx->writing_filename->data + ctx->writing_filename->len) = 0;
 
     /* register event handler */
-    ctx->read_evt.handler = ngx_http_dynamic_sendfile_event_handler;
+    ctx->read_evt.handler = ngx_http_dynamic_sendfile_send_handler;
     ctx->read_evt.data = r;
     ctx->read_evt.log = r->connection->log;
+    ctx->timeout_evt.handler = ngx_http_dynamic_sendfile_timeout_handler;
+    ctx->timeout_evt.data = r;
+    ctx->timeout_evt.log = r->connection->log;
 
     return ctx;
 }
@@ -251,6 +265,10 @@ ngx_http_dynamic_sendfile_handler(ngx_http_request_t *r)
         ngx_http_set_ctx(r, ctx, ngx_http_dynamic_sendfile_module);
     }
 
+    /* make sure file path is right */
+    *(ctx->finished_filename->data + ctx->finished_filename->len) = 0;
+    *(ctx->writing_filename->data + ctx->writing_filename->len) = 0;
+    
     if (ngx_is_file_write_done(ctx->finished_filename) == NGX_OK) { 
         dd("the file(%s) existed, next to static file handler", ctx->finished_filename->data);
         return NGX_DECLINED;
@@ -345,6 +363,9 @@ ngx_http_sendfile_contents(ngx_http_request_t *r)
     n = ngx_read_fd(ctx->fd, content, sizeof(content));
     if (n == 0) {
         dd("the file have not updated yet");
+        if (!ctx->timeout_evt.timer_set) {
+            ngx_add_timer(&ctx->timeout_evt, dscf->dy_send_timeout);
+        }
         return NGX_OK;
     }
     buf->start = buf->pos = content;
@@ -365,7 +386,7 @@ ngx_http_sendfile_contents(ngx_http_request_t *r)
 
 
 static void 
-ngx_http_dynamic_sendfile_cleanup_timer(void* data)
+ngx_http_dynamic_sendfile_cleanup_timers(void* data)
 {
     ngx_http_request_t              *r = data;
     ngx_http_dynamic_sendfile_ctx_t *ctx;
@@ -373,7 +394,7 @@ ngx_http_dynamic_sendfile_cleanup_timer(void* data)
         return;
     }
 
-    dd("ngx_http_dynamic_sendfile_cleanup_timer");
+    dd("ngx_http_dynamic_sendfile_cleanup_timers");
 
     ctx = ngx_http_get_module_ctx(r, ngx_http_dynamic_sendfile_module);
     if (ctx == NULL) {
@@ -382,7 +403,10 @@ ngx_http_dynamic_sendfile_cleanup_timer(void* data)
 
     if (ctx->read_evt.timer_set) {
         ngx_del_timer(&ctx->read_evt);
-        return;
+    }
+
+    if (ctx->timeout_evt.timer_set) {
+        ngx_del_timer(&ctx->timeout_evt);
     }
 }
 
@@ -406,7 +430,7 @@ ngx_http_dynamic_sendfile_add_cleanup(ngx_http_request_t *r)
     if (cln == NULL) {
         return;
     }
-    cln->handler = ngx_http_dynamic_sendfile_cleanup_timer;
+    cln->handler = ngx_http_dynamic_sendfile_cleanup_timers;
     cln->data = r;
 
     /* cleanup opening file */
@@ -423,14 +447,14 @@ ngx_http_dynamic_sendfile_add_cleanup(ngx_http_request_t *r)
 
 
 void
-ngx_http_dynamic_sendfile_event_handler(ngx_event_t *ev)
+ngx_http_dynamic_sendfile_send_handler(ngx_event_t *ev)
 {
     ngx_connection_t                        *c;
     ngx_http_request_t                      *r;
     ngx_http_dynamic_sendfile_ctx_t         *ctx;
     ngx_http_dynamic_sendfile_loc_conf_t    *dscf;
 
-    dd("ngx_http_dynamic_sendfile_event_handler");
+    dd("ngx_http_dynamic_sendfile_send_handler");
 
     r = ev->data;
     c = r->connection;
@@ -464,4 +488,43 @@ ngx_http_dynamic_sendfile_event_handler(ngx_event_t *ev)
         ngx_http_sendfile_contents(r);
         ngx_add_timer(&ctx->read_evt, dscf->dy_send_interval);
     }
+}
+
+
+void
+ngx_http_dynamic_sendfile_timeout_handler(ngx_event_t *ev) 
+{
+    ngx_connection_t                        *c;
+    ngx_http_request_t                      *r;
+    ngx_http_dynamic_sendfile_ctx_t         *ctx;
+    ngx_http_dynamic_sendfile_loc_conf_t    *dscf;
+
+    dd("ngx_http_dynamic_sendfile_timeout_handler");
+
+    r = ev->data;
+    c = r->connection;
+
+    if (c->destroyed) {
+        return;
+    }
+
+    if (c->error) {
+        ngx_http_finalize_request(r, NGX_ERROR);
+        return;
+    }
+
+    dscf = ngx_http_get_module_loc_conf(r, ngx_http_dynamic_sendfile_module);
+    if (dscf == NULL) {
+        ngx_http_finalize_request(r, NGX_ERROR);
+        return;
+    }
+
+    ctx = ngx_http_get_module_ctx(r, ngx_http_dynamic_sendfile_module);
+    if (ctx == NULL) {
+        ngx_http_finalize_request(r, NGX_ERROR);
+        return;
+    }
+    /* stop request */
+    ngx_http_send_special(r, NGX_HTTP_LAST);
+    ngx_http_finalize_request(r, NGX_OK);
 }
