@@ -25,7 +25,7 @@ ngx_int_t ngx_http_dynamic_sendfile_header_needed(ngx_http_request_t *r);
 static void ngx_http_dynamic_sendfile_add_cleanup(ngx_http_request_t *r);
 void ngx_http_dynamic_sendfile_send_handler(ngx_event_t *ev);
 void ngx_http_dynamic_sendfile_timeout_handler(ngx_event_t *ev);
-ngx_int_t ngx_is_file_write_done(ngx_http_dynamic_sendfile_ctx_t *ctx;);
+ngx_int_t ngx_is_file_write_done(ngx_http_dynamic_sendfile_ctx_t *ctx);
 
 typedef struct {
     ngx_str_t                   file_suffix;
@@ -514,11 +514,13 @@ ngx_http_dynamic_sendfile_send_handler(ngx_event_t *ev)
             ngx_add_timer(&ctx->timeout_evt, dscf->dy_send_timeout);
         }
 
-        dd("the file(%s) is writting, add timer", ctx->file_buf->file->name.data);
-        ngx_add_timer(&ctx->read_evt, dscf->dy_send_interval);
+        if (rc == NGX_OK) {
+            dd("the file(%s) is writting, add timer", ctx->file_buf->file->name.data);
+            ngx_add_timer(&ctx->read_evt, dscf->dy_send_interval);
 
-        if (ctx->timeout_evt.timer_set && !ctx->timeout_evt.timedout) {
-            ngx_del_timer(&ctx->timeout_evt);
+            if (ctx->timeout_evt.timer_set && !ctx->timeout_evt.timedout) {
+                ngx_del_timer(&ctx->timeout_evt);
+            }
         }
     }
 }
