@@ -364,7 +364,7 @@ ngx_http_sendfile_contents(ngx_http_request_t *r)
     dd("ngx_http_sendfile_contents");
 
     c = r->connection;
-    if (!c->write || c->error || c->destroyed) {
+    if (c->error) {
         return NGX_ERROR;
     }
 
@@ -379,11 +379,12 @@ ngx_http_sendfile_contents(ngx_http_request_t *r)
     }
 
     if (ngx_file_info(ctx->file_buf->file->name.data, &ctx->file_buf->file->info) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_ERR, c->log, "ngx_file_info(%V) error", &ctx->file_buf->file->name);
         return NGX_ERROR;
     }
 
     size = ctx->file_buf->file->info.st_size;
-    dd("size=%lld ctx->offset=%lld", size, ctx->offset);
+    dd("size=%lld offset=%lld", size, ctx->offset);
     if (size == ctx->offset || size == 0) {
         return NGX_AGAIN;
     }
@@ -515,13 +516,12 @@ ngx_http_dynamic_sendfile_send_handler(ngx_event_t *ev)
         }
 
         if (rc == NGX_OK) {
-            dd("the file(%s) is writting, add timer", ctx->file_buf->file->name.data);
-            ngx_add_timer(&ctx->read_evt, dscf->dy_send_interval);
-
             if (ctx->timeout_evt.timer_set && !ctx->timeout_evt.timedout) {
                 ngx_del_timer(&ctx->timeout_evt);
             }
         }
+        dd("the file(%s) is writting, add timer", ctx->file_buf->file->name.data);
+        ngx_add_timer(&ctx->read_evt, dscf->dy_send_interval);
     }
 }
 
