@@ -285,7 +285,7 @@ ngx_http_dynamic_sendfile_handler(ngx_http_request_t *r)
     /* open file */
     ctx->file_buf->file->fd = ngx_open_file(ctx->writing_filename->data, NGX_FILE_RDONLY, NGX_FILE_OPEN, NGX_FILE_DEFAULT_ACCESS);
     if (ctx->file_buf->file->fd <= 0) {
-        ngx_log_error(NGX_LOG_NOTICE, r->connection->log, 0,
+        ngx_log_error(NGX_LOG_NOTICE, r->connection->log, ngx_errno,
                           "open tmp file(%V) failed, try to open finished file(%V)", ctx->writing_filename, ctx->finished_filename);
         return NGX_DECLINED;
     }
@@ -379,7 +379,7 @@ ngx_http_sendfile_contents(ngx_http_request_t *r)
     }
 
     if (ngx_file_info(ctx->file_buf->file->name.data, &ctx->file_buf->file->info) == NGX_FILE_ERROR) {
-        ngx_log_error(NGX_LOG_ERR, c->log, "ngx_file_info(%V) error", &ctx->file_buf->file->name);
+        ngx_log_error(NGX_LOG_ERR, c->log, ngx_errno, "ngx_file_info(%V) error", &ctx->file_buf->file->name);
         return NGX_ERROR;
     }
 
