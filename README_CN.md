@@ -1,12 +1,12 @@
-ngx_http_dynamic_sendfile_module | [简体中文](README_CN.md)
+ngx_http_dynamic_sendfile_module 动态发送文件
 ===============================================
 
-Introduction
+作用
 -----------------------------------------------
-> http1.1 chunked encode transfer to send file it's size is not regular
+> 通过使用http1.1 chunked encode transfer 技术 发送动态变化的文件
 
 
-How to Compile
+编译
 -----------------------------------------------
 ```
 cd nginx-1.x.x
@@ -16,7 +16,7 @@ make install
 ```
 
 
-Nginx Configuration
+配置
 ------------------------------------------------
 ```
 location /send/ {
@@ -24,22 +24,22 @@ location /send/ {
     dy_send_interval 1s;
     dy_send_timeout 10s;
     file_suffix ".tmp";
-    dy_send_file;  # Need it
+    dy_send_file;  # 这一项必须要配置 否则模块不生效
 }
 ```
 
-Example
+Demo
 -------------------------------------------------
 ```
-# write some text to file(/tmp/test/hello.txt). Write a line of content every 1s, write 20 lines by default
+# 向/tmp/test/hello.txt 每隔1s写入一行内容 默认写20行
 ./test.sh
 curl http://127.0.0.1:8080/send/hello.txt
 ```
 
-Benchmark
+性能
 -------------------------------------------------
-+ Test hardware environment: Intel Corei7 6core 16G RAM
-+ nginx.conf:
++ 测试环境: Intel Corei7 6核 内存16G
++ nginx配置:
 ```
 #user  nobody;
 worker_processes  auto;
@@ -72,7 +72,7 @@ http {
 }
 ```
 
-+ Request static files:
++ 请求纯静态文件 
 ```
  wrk -d40s --timeout 60s http://127.0.0.1:8080/send/hello.txt
 Running 40s test @ http://127.0.0.1:8080/send/hello.txt
@@ -86,7 +86,7 @@ Transfer/sec:    253.20KB
 ```
 
 
-+ Request dynamic files:
++ 请求动态变化的文件
 ./test.sh 20
 
 ```
@@ -101,4 +101,4 @@ Requests/sec:    250.13
 Transfer/sec:    134.10KB
 ```
 
-> Note: wrk chunked benchmark is not very accurate, only as reference.
+> 注意: wrk chunked压测支持度不够 只能做参考 待找到合适压测工具再更新压测结果
